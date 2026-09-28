@@ -61,28 +61,36 @@ jobs:
           echo "=== cbom.json (head) ==="
           head -c 2000 cbom.json; echo
 
-      - name: CBOM summary for CTO (crypto inventory)
+      - name: CBOM summary (crypto inventory)
+        if: always()
         run: |
           echo "## CBOM POC result" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| File | Components | Crypto assets |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
           for f in bom-npx.json cbom.json; do
-            comps=$(jq '.components | length' $f)
-            cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' $f)
-            echo "| $f | $comps | $cryptos |" >> $GITHUB_STEP_SUMMARY
+            if [ -f "$f" ]; then
+              comps=$(jq '.components | length' $f)
+              cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' $f)
+              echo "| $f | $comps | $cryptos |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $f | MISSING | MISSING |" >> $GITHUB_STEP_SUMMARY
+            fi
           done
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Crypto algorithms found (cbom.json)" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          jq -r '.components[] | select(.cryptoProperties != null) | "\(.name // .["bom-ref"]) -> \(.cryptoProperties.assetType // "?") / \(.cryptoProperties.algorithmRef // "?")"' cbom.json | sort -u | head -40 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "### Crypto lib components" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          jq -r '.components[] | "\(.group // ""):\(.name)@\(.version)"' cbom.json | head -30 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -f cbom.json ]; then
+            echo "### Crypto algorithms found (cbom.json)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            jq -r '.components[] | select(.cryptoProperties != null) | "\(.name // .["bom-ref"]) -> \(.cryptoProperties.assetType // "?") / \(.cryptoProperties.algorithmRef // "?")"' cbom.json | sort -u | head -40 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "### Crypto lib components" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            jq -r '.components[] | "\(.group // ""):\(.name)@\(.version)"' cbom.json | head -30 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Upload BOMs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cbom-poc-boms
