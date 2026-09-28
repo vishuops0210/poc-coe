@@ -1,0 +1,92 @@
+name: CBOM POC with cdxgen
+
+# Purpose: build the demo Java crypto app and generate SBOM + CBOM
+# Tool: ghcr.io/cyclonedx/cdxgen (plus npx for comparison)
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cbom-poc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build demo app
+        run: mvn -B package -DskipTests
+
+      - name: Run crypto demo (proof it works)
+        run: mvn -B org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass="com.example.cbom.CryptoDemo"
+
+      - name: Ensure demo keystore exists (for CBOM cert inventory)
+        run: |
+          if [ ! -f keystore.p12 ]; then
+            keytool -genkeypair -alias demo -keyalg RSA -keysize 2048 \
+              -storetype PKCS12 -keystore keystore.p12 \
+              -storepass changeit -keypass changeit \
+              -dname "CN=cbom-demo, OU=POC, O=Example, L=BLR, C=IN" -validity 365
+          fi
+          keytool -list -keystore keystore.p12 -storepass changeit | head -20
+
+      # ---- 1) npx way (fast, no docker pull) ----
+      - name: Generate SBOM+CBOM via npx cdxgen
+        run: |
+          npx --yes @cyclonedx/cdxgen@latest \
+            -t java --include-crypto --evidence \
+            --spec-version 1.6 -o bom-npx.json -p .
+          echo "=== bom-npx.json (head) ==="
+          head -c 2000 bom-npx.json; echo
+
+      # ---- 2) GHCR image way (full Atom static analysis, as CTO asked) ----
+      - name: Generate CBOM via ghcr.io/cyclonedx/cdxgen
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" -w /app \
+            ghcr.io/cyclonedx/cdxgen:latest \
+            -t java --include-crypto --evidence \
+            --spec-version 1.6 -o cbom.json -p .
+          echo "=== cbom.json (head) ==="
+          head -c 2000 cbom.json; echo
+
+      - name: CBOM summary for CTO (crypto inventory)
+        run: |
+          echo "## CBOM POC result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Components | Crypto assets |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          for f in bom-npx.json cbom.json; do
+            comps=$(jq '.components | length' $f)
+            cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' $f)
+            echo "| $f | $comps | $cryptos |" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Crypto algorithms found (cbom.json)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          jq -r '.components[] | select(.cryptoProperties != null) | "\(.name // .["bom-ref"]) -> \(.cryptoProperties.assetType // "?") / \(.cryptoProperties.algorithmRef // "?")"' cbom.json | sort -u | head -40 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### Crypto lib components" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          jq -r '.components[] | "\(.group // ""):\(.name)@\(.version)"' cbom.json | head -30 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload BOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: cbom-poc-boms
+          path: |
+            bom-npx.json
+            cbom.json
+            keystore.p12
