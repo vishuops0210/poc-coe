@@ -1,15 +1,19 @@
 name: CBOM POC with cdxgen
 
-# Purpose: build the demo Java crypto app and generate CBOM
-# Tool: ghcr.io/cyclonedx/cdxgen (single method)
+# Production-style CBOM pipeline. Single method, single artifact: cbom.json
+# Tool: ghcr.io/cyclonedx/cdxgen (pinned by digest = immutable)
 on:
   push:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
 
+env:
+  # Pinned image (digest from a verified pull — reproducible, production way)
+  CDXGEN_IMAGE: ghcr.io/cyclonedx/cdxgen:latest@sha256:525bb244efee85f7bdc261b67a43e943dc4dc112e287b3450b4a86629ef1e4e7
+
 jobs:
-  cbom-poc:
+  cbom:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,7 +35,7 @@ jobs:
       - name: Run crypto demo (proof it works)
         run: mvn -B org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass="com.example.cbom.CryptoDemo"
 
-      - name: Ensure demo keystore exists (for CBOM cert inventory)
+      - name: Ensure demo keystore exists (cert inventory for CBOM)
         run: |
           if [ ! -f keystore.p12 ]; then
             keytool -genkeypair -alias demo -keyalg RSA -keysize 2048 \
@@ -39,48 +43,43 @@ jobs:
               -storepass changeit -keypass changeit \
               -dname "CN=cbom-demo, OU=POC, O=Example, L=BLR, C=IN" -validity 365
           fi
-          keytool -list -keystore keystore.p12 -storepass changeit | head -20
+          keytool -list -keystore keystore.p12 -storepass changeit | head -10
 
-      # Single method: GHCR image (bundled java+maven+atom, reproducible)
-      # NOTE: --user root avoids EACCES on the mounted workspace.
-      - name: Generate CBOM via ghcr.io/cyclonedx/cdxgen
+      # CBOM ONLY — dedicated `cbom` binary (CBOM-oriented defaults),
+      # not the SBOM generator. --user root avoids EACCES on the mount.
+      - name: Generate CBOM
         run: |
-          docker run --rm --user root \
+          docker run --rm --user root --entrypoint cbom \
             -v "${{ github.workspace }}:/app" -w /app \
-            ghcr.io/cyclonedx/cdxgen:latest \
-            -t java --include-crypto --evidence \
-            --spec-version 1.6 -o cbom.json -p .
+            "$CDXGEN_IMAGE" \
+            -t java --spec-version 1.6 --evidence -o cbom.json -p .
           sudo chown -R $USER:$USER "${{ github.workspace }}" || true
-          echo "=== cbom.json (head) ==="
-          head -c 2000 cbom.json; echo
+          test -f cbom.json || { echo "FATAL: cbom.json not generated"; exit 1; }
+          head -c 1500 cbom.json; echo
 
-      - name: CBOM summary (crypto inventory)
-        if: always()
+      - name: CBOM gate (must contain crypto assets)
         run: |
-          echo "## CBOM POC result" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f cbom.json ]; then
-            comps=$(jq '.components | length' cbom.json)
-            cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' cbom.json)
-            echo "Components: $comps, crypto assets: $cryptos" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Crypto algorithms found" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            jq -r '.components[] | select(.cryptoProperties != null) | "\(.name // .["bom-ref"]) -> \(.cryptoProperties.assetType // "?") / \(.cryptoProperties.algorithmRef // "?")"' cbom.json | sort -u | head -40 >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "### Crypto lib components" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            jq -r '.components[] | "\(.group // ""):\(.name)@\(.version)"' cbom.json | head -30 >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "cbom.json MISSING — check the Generate CBOM step log." >> $GITHUB_STEP_SUMMARY
+          comps=$(jq '.components | length' cbom.json)
+          cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' cbom.json)
+          echo "Components: $comps, crypto assets: $cryptos"
+          {
+            echo "## CBOM result"
+            echo ""
+            echo "Components: $comps, crypto assets: $cryptos"
+            echo ""
+            echo '```'
+            jq -r '.components[] | select(.cryptoProperties != null) | "\(.name // .["bom-ref"])"' cbom.json | sort -u | head -40
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+          if [ "$cryptos" -eq 0 ]; then
+            echo "::warning::CBOM has 0 crypto assets — pipeline passes for the POC, flip this to exit 1 once baselined."
           fi
 
-      - name: Upload BOM
+      - name: Upload CBOM
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cbom-poc-bom
+          name: cbom
           path: |
             cbom.json
             keystore.p12
