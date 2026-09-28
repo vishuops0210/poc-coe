@@ -1,7 +1,7 @@
 name: CBOM POC with cdxgen
 
-# Purpose: build the demo Java crypto app and generate SBOM + CBOM
-# Tool: ghcr.io/cyclonedx/cdxgen (plus npx for comparison)
+# Purpose: build the demo Java crypto app and generate CBOM
+# Tool: ghcr.io/cyclonedx/cdxgen (single method)
 on:
   push:
     branches: ["main"]
@@ -41,23 +41,16 @@ jobs:
           fi
           keytool -list -keystore keystore.p12 -storepass changeit | head -20
 
-      # ---- 1) npx way (fast, no docker pull) ----
-      - name: Generate SBOM+CBOM via npx cdxgen
-        run: |
-          npx --yes @cyclonedx/cdxgen@latest \
-            -t java --include-crypto --evidence \
-            --spec-version 1.6 -o bom-npx.json -p .
-          echo "=== bom-npx.json (head) ==="
-          head -c 2000 bom-npx.json; echo
-
-      # ---- 2) GHCR image way (full Atom static analysis, as CTO asked) ----
+      # Single method: GHCR image (bundled java+maven+atom, reproducible)
+      # NOTE: --user root avoids EACCES on the mounted workspace.
       - name: Generate CBOM via ghcr.io/cyclonedx/cdxgen
         run: |
-          docker run --rm \
+          docker run --rm --user root \
             -v "${{ github.workspace }}:/app" -w /app \
             ghcr.io/cyclonedx/cdxgen:latest \
             -t java --include-crypto --evidence \
             --spec-version 1.6 -o cbom.json -p .
+          sudo chown -R $USER:$USER "${{ github.workspace }}" || true
           echo "=== cbom.json (head) ==="
           head -c 2000 cbom.json; echo
 
@@ -66,20 +59,12 @@ jobs:
         run: |
           echo "## CBOM POC result" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Components | Crypto assets |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
-          for f in bom-npx.json cbom.json; do
-            if [ -f "$f" ]; then
-              comps=$(jq '.components | length' $f)
-              cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' $f)
-              echo "| $f | $comps | $cryptos |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $f | MISSING | MISSING |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
           if [ -f cbom.json ]; then
-            echo "### Crypto algorithms found (cbom.json)" >> $GITHUB_STEP_SUMMARY
+            comps=$(jq '.components | length' cbom.json)
+            cryptos=$(jq '[.components[] | select(.cryptoProperties != null or .type=="cryptographic-asset")] | length' cbom.json)
+            echo "Components: $comps, crypto assets: $cryptos" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Crypto algorithms found" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             jq -r '.components[] | select(.cryptoProperties != null) | "\(.name // .["bom-ref"]) -> \(.cryptoProperties.assetType // "?") / \(.cryptoProperties.algorithmRef // "?")"' cbom.json | sort -u | head -40 >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
@@ -87,14 +72,15 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
             jq -r '.components[] | "\(.group // ""):\(.name)@\(.version)"' cbom.json | head -30 >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "cbom.json MISSING — check the Generate CBOM step log." >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload BOMs
+      - name: Upload BOM
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cbom-poc-boms
+          name: cbom-poc-bom
           path: |
-            bom-npx.json
             cbom.json
             keystore.p12
